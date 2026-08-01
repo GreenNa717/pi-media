@@ -116,6 +116,6 @@ npm run pack:dry
 
 自动化测试使用本地模拟服务，不调用真实模型。
 
-## 友链
+## 社区支持
 
-[LINUX DO](https://linux.do)
+(https://linux.do)
