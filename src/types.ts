@@ -2,7 +2,12 @@ export const MEDIA_KINDS = ["image", "audio", "video", "pdf"] as const;
 
 export type MediaKind = (typeof MEDIA_KINDS)[number];
 export type DetailLevel = "task" | "full";
-export type AdapterProtocol = "openai-chat" | "openai-responses" | "anthropic-messages" | "gemini";
+export type AdapterProtocol =
+  | "openai-chat"
+  | "openai-responses"
+  | "anthropic-messages"
+  | "gemini"
+  | "custom-openai-chat";
 export type GeminiVariant = "generate-content" | "interactions";
 
 export type MediaSource =
@@ -31,6 +36,8 @@ export interface EndpointConfig {
   path?: string;
   streamPath?: string;
   uploadPath?: string;
+  apiKeyHeader?: string;
+  apiKeyPrefix?: string;
   model: string;
   modalities: MediaKind[];
   auth: EndpointAuth;

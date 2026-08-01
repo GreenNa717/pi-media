@@ -7,6 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   anthropicMessagesAdapter,
+  customOpenAIChatAdapter,
   geminiAdapter,
   openAIChatAdapter,
   openAIResponsesAdapter,
@@ -37,6 +38,24 @@ const PDF: MediaAsset = {
   mimeType: "application/pdf",
   sizeBytes: 8,
   source: { type: "inline", data: Buffer.from("%PDF-1.7").toString("base64") },
+};
+const AUDIO: MediaAsset = {
+  id: "media-3",
+  index: 2,
+  kind: "audio",
+  name: "sample.flac",
+  mimeType: "audio/flac",
+  sizeBytes: 8,
+  source: { type: "inline", data: Buffer.from("fLaCtest").toString("base64") },
+};
+const VIDEO: MediaAsset = {
+  id: "media-4",
+  index: 3,
+  kind: "video",
+  name: "sample.mp4",
+  mimeType: "video/mp4",
+  sizeBytes: 12,
+  source: { type: "inline", data: Buffer.from("video-content").toString("base64") },
 };
 const PLAN: AnalysisPlan = {
   objective: "inspect the files",
@@ -70,13 +89,14 @@ function sse(response: ServerResponse, chunks: readonly string[]): void {
 
 function endpoint(base: string, protocol: AdapterProtocol, modalities: EndpointConfig["modalities"]): ResolvedEndpoint {
   const version = protocol === "gemini" ? "v1beta" : "v1";
+  const baseUrl = protocol === "custom-openai-chat" ? `${base}/custom/${version}` : `${base}/${version}`;
   return {
     id: protocol,
-    baseUrl: `${base}/${version}`,
+    baseUrl,
     headers: {},
     config: {
       protocol,
-      baseUrl: `${base}/${version}`,
+      baseUrl,
       model: protocol === "gemini" ? "gemini-test" : "test-model",
       modalities,
       auth: { type: "none" },
@@ -92,7 +112,7 @@ function endpoint(base: string, protocol: AdapterProtocol, modalities: EndpointC
   };
 }
 
-test("serializes and parses all four protocol adapters", async (context) => {
+test("serializes and parses every protocol adapter", async (context) => {
   const payloads = new Map<string, unknown>();
   let chatAttempts = 0;
   const server = createServer(async (request, response) => {
@@ -102,6 +122,9 @@ test("serializes and parses all four protocol adapters", async (context) => {
       chatAttempts += 1;
       if (chatAttempts === 1) return json(response, { error: "retry" }, 500);
       return json(response, { choices: [{ message: { content: "chat report" } }] });
+    }
+    if (path === "/custom/v1/chat/completions") {
+      return json(response, { choices: [{ message: { content: "custom report" } }] });
     }
     if (path === "/v1/responses") {
       return json(response, { output: [{ content: [{ type: "output_text", text: "responses report" }] }] });
@@ -129,12 +152,18 @@ test("serializes and parses all four protocol adapters", async (context) => {
     plan: PLAN,
   });
   const gemini = await geminiAdapter.analyze({ endpoint: endpoint(base, "gemini", ["image"]), assets: [IMAGE], plan: PLAN });
+  const custom = await customOpenAIChatAdapter.analyze({
+    endpoint: endpoint(base, "custom-openai-chat", ["image", "audio", "video"]),
+    assets: [IMAGE, AUDIO, VIDEO],
+    plan: PLAN,
+  });
 
   assert.equal(chat.text, "chat report");
   assert.equal(chatAttempts, 2);
   assert.equal(responses.text, "responses report");
   assert.equal(anthropic.text, "anthropic report");
   assert.equal(gemini.text, "gemini report");
+  assert.equal(custom.text, "custom report");
 
   const chatBody = payloads.get("/v1/chat/completions") as { messages: Array<{ content: unknown[] }> };
   assert.equal((chatBody.messages[0]?.content[1] as { type: string }).type, "image_url");
@@ -146,6 +175,19 @@ test("serializes and parses all four protocol adapters", async (context) => {
     contents: Array<{ parts: Array<Record<string, unknown>> }>;
   };
   assert.ok(geminiBody.contents[0]?.parts[1]?.inlineData);
+  const customBody = payloads.get("/custom/v1/chat/completions") as {
+    messages: Array<{ content: Array<Record<string, unknown>> }>;
+  };
+  assert.deepEqual(customBody.messages[0]?.content.map((part) => part.type), [
+    "image_url",
+    "input_audio",
+    "video_url",
+    "text",
+  ]);
+  const customAudio = customBody.messages[0]?.content[1] as { input_audio: { data: string } };
+  const customVideo = customBody.messages[0]?.content[2] as { video_url: { url: string } };
+  assert.ok(customAudio.input_audio.data.startsWith("data:audio/flac;base64,"));
+  assert.ok(customVideo.video_url.url.startsWith("data:video/mp4;base64,"));
 });
 
 test("Gemini uploads, polls, analyzes, and deletes a large file", async (context) => {
@@ -223,6 +265,13 @@ test("streams deltas from every supported protocol variant", async (context) => 
         "data: [DONE]\n\n",
       ]);
     }
+    if (path === "/custom/v1/chat/completions") {
+      return sse(response, [
+        'data: {"choices":[{"delta":{"content":"custom "}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"stream"}}]}\n\n',
+        "data: [DONE]\n\n",
+      ]);
+    }
     if (path === "/v1/responses") {
       return sse(response, [
         'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"responses "}\n\n',
@@ -267,17 +316,44 @@ test("streams deltas from every supported protocol variant", async (context) => 
   const interactionEndpoint = endpoint(base, "gemini", ["image"]);
   interactionEndpoint.config.geminiVariant = "interactions";
   const interaction = await geminiAdapter.analyze({ endpoint: interactionEndpoint, assets: [IMAGE], plan: PLAN, onProgress });
+  const custom = await customOpenAIChatAdapter.analyze({
+    endpoint: endpoint(base, "custom-openai-chat", ["video"]),
+    assets: [VIDEO],
+    plan: PLAN,
+    onProgress,
+  });
 
   assert.equal(chat.text, "chat stream");
   assert.equal(responses.text, "responses stream");
   assert.equal(anthropic.text, "anthropic stream");
   assert.equal(gemini.text, "gemini stream");
   assert.equal(interaction.text, "interaction stream");
-  assert.ok(deltas.length >= 10);
+  assert.equal(custom.text, "custom stream");
+  assert.ok(deltas.length >= 12);
   assert.equal((bodies.get("/v1/chat/completions") as { stream: boolean }).stream, true);
   assert.equal((bodies.get("/v1/responses") as { stream: boolean }).stream, true);
   assert.equal((bodies.get("/v1/messages") as { stream: boolean }).stream, true);
   assert.equal((bodies.get("/v1beta/interactions") as { stream: boolean }).stream, true);
+  assert.equal((bodies.get("/custom/v1/chat/completions") as { stream: boolean }).stream, true);
+});
+
+test("uses the configured custom API key header", async (context) => {
+  let receivedKey: string | undefined;
+  const server = createServer(async (request, response) => {
+    receivedKey = typeof request.headers["api-key"] === "string" ? request.headers["api-key"] : undefined;
+    await requestBody(request);
+    return json(response, { choices: [{ message: { content: "ok" } }] });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  context.after(() => server.close());
+  const address = server.address() as AddressInfo;
+  const resolved = endpoint(`http://127.0.0.1:${address.port}`, "custom-openai-chat", ["image"]);
+  resolved.apiKey = "custom-secret";
+  resolved.config.apiKeyHeader = "api-key";
+  resolved.config.apiKeyPrefix = "";
+
+  await customOpenAIChatAdapter.analyze({ endpoint: resolved, assets: [IMAGE], plan: PLAN });
+  assert.equal(receivedKey, "custom-secret");
 });
 
 test("falls back to JSON only when streaming is rejected before a delta", async (context) => {

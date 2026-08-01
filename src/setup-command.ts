@@ -16,6 +16,7 @@ import {
 import type { AdapterProtocol, MediaKind } from "./types.ts";
 
 const PROTOCOL_OPTIONS = [
+  { label: "自定义端点（OpenAI Chat 兼容，图片、音频、视频）", value: "custom-openai-chat" },
   { label: "Gemini（图片、音频、视频、PDF）", value: "gemini" },
   { label: "OpenAI Responses（图片、PDF）", value: "openai-responses" },
   { label: "OpenAI Chat Completions（图片、MP3/WAV）", value: "openai-chat" },
@@ -158,6 +159,21 @@ async function selectModel(
 
 function modalityPresets(protocol: AdapterProtocol): Array<{ label: string; kinds: MediaKind[] }> {
   const all = protocolModalities(protocol);
+  if (protocol === "custom-openai-chat") {
+    const combinations: MediaKind[][] = [];
+    for (let mask = 1; mask < 2 ** all.length; mask += 1) {
+      combinations.push(all.filter((_kind, index) => (mask & (1 << index)) !== 0));
+    }
+    combinations.sort((left, right) => right.length - left.length);
+    return combinations.map((kinds) => ({
+      label: kinds.length === all.length
+        ? `全部：${kinds.map((kind) => KIND_NAMES[kind]).join("、")}`
+        : kinds.length === 1
+          ? `仅${KIND_NAMES[kinds[0]!]}`
+          : kinds.map((kind) => KIND_NAMES[kind]).join("、"),
+      kinds,
+    }));
+  }
   const presets: Array<{ label: string; kinds: MediaKind[] }> = [
     { label: `全部：${all.map((kind) => KIND_NAMES[kind]).join("、")}`, kinds: all },
     ...all.map((kind) => ({ label: `仅${KIND_NAMES[kind]}`, kinds: [kind] })),
@@ -182,39 +198,78 @@ export async function runSetupCommand(ctx: ExtensionCommandContext): Promise<voi
   const scope = await ctx.ui.select("保存位置", scopeLabels);
   if (!scope) return cancelled(ctx);
 
-  const protocolLabel = await ctx.ui.select("选择接口协议", PROTOCOL_OPTIONS.map((option) => option.label));
+  const protocolLabel = await ctx.ui.select("选择端点类型", PROTOCOL_OPTIONS.map((option) => option.label));
   if (!protocolLabel) return cancelled(ctx);
   const protocol = protocolFromLabel(protocolLabel);
   if (!protocol) throw new Error("未知协议");
 
   const suggestedUrl = defaultBaseUrl(protocol);
-  const enteredUrl = await ctx.ui.input(`API URL（留空使用 ${suggestedUrl}）`);
+  const enteredUrl = await ctx.ui.input(suggestedUrl ? `API Base URL（留空使用 ${suggestedUrl}）` : "API Base URL");
   if (enteredUrl === undefined) return cancelled(ctx);
-  const baseUrl = normalizeBaseUrl(enteredUrl.trim() || suggestedUrl);
+  const rawBaseUrl = enteredUrl.trim() || suggestedUrl;
+  if (!rawBaseUrl) throw new Error("API URL 不能为空");
+  const baseUrl = normalizeBaseUrl(rawBaseUrl);
 
-  const authMode = await ctx.ui.select("鉴权方式", ["输入 API Key", "无需鉴权"]);
+  const customProtocol = protocol === "custom-openai-chat";
+  const authOptions = customProtocol
+    ? ["Authorization: Bearer", "api-key 请求头", "x-api-key 请求头", "自定义 Key 请求头", "无需鉴权"]
+    : ["输入 API Key", "无需鉴权"];
+  const authMode = await ctx.ui.select("鉴权方式", authOptions);
   if (!authMode) return cancelled(ctx);
   let apiKey: string | undefined;
-  if (authMode === "输入 API Key") {
+  let apiKeyHeader: string | undefined;
+  let apiKeyPrefix: string | undefined;
+  if (authMode !== "无需鉴权") {
     const enteredKey = await promptSecret(ctx);
     if (enteredKey === undefined) return cancelled(ctx);
     if (!enteredKey.trim()) throw new Error("API Key 不能为空");
     apiKey = enteredKey.trim();
+    if (customProtocol) {
+      if (authMode === "Authorization: Bearer") {
+        apiKeyHeader = "authorization";
+        apiKeyPrefix = "Bearer ";
+      } else if (authMode === "api-key 请求头") {
+        apiKeyHeader = "api-key";
+        apiKeyPrefix = "";
+      } else if (authMode === "x-api-key 请求头") {
+        apiKeyHeader = "x-api-key";
+        apiKeyPrefix = "";
+      } else {
+        const enteredHeader = await ctx.ui.input("Key 请求头名称");
+        if (enteredHeader === undefined) return cancelled(ctx);
+        const header = enteredHeader.trim();
+        if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(header)) throw new Error("Key 请求头名称无效");
+        apiKeyHeader = header;
+        apiKeyPrefix = "";
+      }
+    }
   }
 
   ctx.ui.setStatus("media-router", "正在获取模型列表");
-  let models: DiscoveredModel[];
+  let models: DiscoveredModel[] = [];
   try {
     models = await discoverModels(protocol, baseUrl, {
       ...(apiKey ? { apiKey } : {}),
+      ...(apiKeyHeader ? { apiKeyHeader } : {}),
+      ...(apiKeyPrefix !== undefined ? { apiKeyPrefix } : {}),
       ...(ctx.signal ? { signal: ctx.signal } : {}),
     });
+  } catch (error) {
+    if (!customProtocol) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.ui.notify(`无法自动获取模型列表：${message}\n请手动输入模型 ID。`, "warning");
   } finally {
     ctx.ui.setStatus("media-router", undefined);
   }
-  if (models.length === 0) throw new Error("接口没有返回可用模型");
-
-  const model = await selectModel(ctx, models);
+  let model: DiscoveredModel | undefined;
+  if (models.length > 0) {
+    model = await selectModel(ctx, models);
+  } else if (customProtocol) {
+    const manual = await ctx.ui.input("输入模型 ID");
+    if (manual?.trim()) model = { id: manual.trim() };
+  } else {
+    throw new Error("接口没有返回可用模型");
+  }
   if (!model) return cancelled(ctx);
   const presets = modalityPresets(protocol);
   const modalityLabel = await ctx.ui.select("启用媒体类型", presets.map((preset) => preset.label));
@@ -238,7 +293,9 @@ export async function runSetupCommand(ctx: ExtensionCommandContext): Promise<voi
       `主机：${new URL(baseUrl).host}`,
       `模型：${model.id}`,
       `媒体：${modalities.map((kind) => KIND_NAMES[kind]).join("、")}`,
-      apiKey ? `Key：保存到本地未加密凭据文件 ${storedCredentialsPath()}` : "鉴权：无",
+      apiKey
+        ? `Key：${apiKeyHeader ? `${apiKeyHeader} 请求头；` : ""}保存到本地未加密凭据文件 ${storedCredentialsPath()}`
+        : "鉴权：无",
     ].join("\n"),
   );
   if (!confirmed) return cancelled(ctx);
@@ -252,6 +309,8 @@ export async function runSetupCommand(ctx: ExtensionCommandContext): Promise<voi
     model: model.id,
     modalities,
     ...(apiKey ? { apiKey } : {}),
+    ...(apiKeyHeader ? { apiKeyHeader } : {}),
+    ...(apiKeyPrefix !== undefined ? { apiKeyPrefix } : {}),
   });
   ctx.ui.notify(`配置已保存：${targetPath}\n运行 /media doctor 检查配置。`, "info");
 }

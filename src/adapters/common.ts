@@ -15,6 +15,7 @@ export const PROTOCOL_KINDS: Record<ResolvedEndpoint["config"]["protocol"], read
   "openai-responses": ["image", "pdf"],
   "anthropic-messages": ["image", "pdf"],
   gemini: ["image", "audio", "video", "pdf"],
+  "custom-openai-chat": ["image", "audio", "video"],
 };
 
 export function assertAssets(request: AdapterRequest, supportedKinds: readonly MediaKind[]): void {
@@ -86,6 +87,14 @@ export function jsonHeaders(endpoint: ResolvedEndpoint): Record<string, string> 
 export function openAIHeaders(endpoint: ResolvedEndpoint): Record<string, string> {
   const headers = jsonHeaders(endpoint);
   if (endpoint.apiKey && !hasHeader(headers, "authorization")) headers.authorization = `Bearer ${endpoint.apiKey}`;
+  return headers;
+}
+
+export function customOpenAIHeaders(endpoint: ResolvedEndpoint): Record<string, string> {
+  const headers = jsonHeaders(endpoint);
+  const header = endpoint.config.apiKeyHeader ?? "authorization";
+  const prefix = endpoint.config.apiKeyPrefix ?? "Bearer ";
+  if (endpoint.apiKey && !hasHeader(headers, header)) headers[header] = `${prefix}${endpoint.apiKey}`;
   return headers;
 }
 

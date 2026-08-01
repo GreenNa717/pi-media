@@ -1,6 +1,6 @@
 {
   "name": "pi-media-router",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Route local media through multimodal APIs before a text-only Pi model handles the request.",
   "type": "module",
   "license": "MIT",

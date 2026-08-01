@@ -20,6 +20,7 @@ const PROTOCOLS: readonly AdapterProtocol[] = [
   "openai-responses",
   "anthropic-messages",
   "gemini",
+  "custom-openai-chat",
 ];
 
 export const DEFAULT_EXTENSIONS: ExtensionConfig = {
@@ -77,6 +78,24 @@ function optionalString(record: Record<string, unknown>, key: string): string | 
   const value = record[key];
   if (value === undefined) return undefined;
   if (typeof value !== "string" || !value.trim()) throw new ConfigError(`${key} must be a non-empty string`);
+  return value;
+}
+
+function optionalApiKeyHeader(record: Record<string, unknown>, fallback?: string): string | undefined {
+  const value = record.apiKeyHeader ?? fallback;
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(value)) {
+    throw new ConfigError("apiKeyHeader must be a valid HTTP header name");
+  }
+  return value;
+}
+
+function optionalApiKeyPrefix(record: Record<string, unknown>, fallback?: string): string | undefined {
+  const value = record.apiKeyPrefix ?? fallback;
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new ConfigError("apiKeyPrefix must be a string without control characters");
+  }
   return value;
 }
 
@@ -142,6 +161,9 @@ function endpointDefaults(protocol: AdapterProtocol): Pick<EndpointConfig, "time
   if (protocol === "gemini") {
     return { timeoutMs: 600_000, maxBytes: 512 * 1024 * 1024, maxInlineBytes: 20 * 1024 * 1024 };
   }
+  if (protocol === "custom-openai-chat") {
+    return { timeoutMs: 180_000, maxBytes: 37 * 1024 * 1024, maxInlineBytes: 37 * 1024 * 1024 };
+  }
   return { timeoutMs: 180_000, maxBytes: 20 * 1024 * 1024, maxInlineBytes: 20 * 1024 * 1024 };
 }
 
@@ -175,12 +197,16 @@ function parseEndpoint(id: string, value: unknown, fallback?: EndpointConfig): E
   const path = optionalString(value, "path") ?? fallback?.path;
   const streamPath = optionalString(value, "streamPath") ?? fallback?.streamPath;
   const uploadPath = optionalString(value, "uploadPath") ?? fallback?.uploadPath;
+  const apiKeyHeader = optionalApiKeyHeader(value, fallback?.apiKeyHeader);
+  const apiKeyPrefix = optionalApiKeyPrefix(value, fallback?.apiKeyPrefix);
   return {
     protocol,
     ...(baseUrl ? { baseUrl } : {}),
     ...(path ? { path } : {}),
     ...(streamPath ? { streamPath } : {}),
     ...(uploadPath ? { uploadPath } : {}),
+    ...(apiKeyHeader ? { apiKeyHeader } : {}),
+    ...(apiKeyPrefix !== undefined ? { apiKeyPrefix } : {}),
     model,
     modalities: modalities as MediaKind[],
     auth: parseAuth(value.auth, `endpoints.${id}.auth`, fallback?.auth),

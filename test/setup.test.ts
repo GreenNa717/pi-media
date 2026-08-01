@@ -16,6 +16,7 @@ test("discovers models for every protocol with the expected authentication", asy
     url: string;
     authorization?: string;
     apiKey?: string;
+    customKey?: string;
     googleKey?: string;
     anthropicVersion?: string;
   }> = [];
@@ -24,6 +25,7 @@ test("discovers models for every protocol with the expected authentication", asy
       url: request.url ?? "",
       ...(request.headers.authorization ? { authorization: request.headers.authorization } : {}),
       ...(typeof request.headers["x-api-key"] === "string" ? { apiKey: request.headers["x-api-key"] } : {}),
+      ...(typeof request.headers["api-key"] === "string" ? { customKey: request.headers["api-key"] } : {}),
       ...(typeof request.headers["x-goog-api-key"] === "string" ? { googleKey: request.headers["x-goog-api-key"] } : {}),
       ...(typeof request.headers["anthropic-version"] === "string"
         ? { anthropicVersion: request.headers["anthropic-version"] }
@@ -59,14 +61,21 @@ test("discovers models for every protocol with the expected authentication", asy
   const responses = await discoverModels("openai-responses", `${base}/v1`, { apiKey: "test-key" });
   const anthropic = await discoverModels("anthropic-messages", `${base}/v1`, { apiKey: "test-key" });
   const gemini = await discoverModels("gemini", `${base}/v1beta`, { apiKey: "test-key" });
+  const custom = await discoverModels("custom-openai-chat", `${base}/v1`, {
+    apiKey: "test-key",
+    apiKeyHeader: "api-key",
+    apiKeyPrefix: "",
+  });
 
   assert.deepEqual(chat.map((model) => model.id), ["vision-a", "vision-b"]);
   assert.deepEqual(responses.map((model) => model.id), ["vision-a", "vision-b"]);
   assert.deepEqual(anthropic, [{ id: "claude-media", displayName: "Claude Media" }]);
   assert.deepEqual(gemini, [{ id: "gemini-media", displayName: "Gemini Media" }]);
+  assert.deepEqual(custom.map((model) => model.id), ["vision-a", "vision-b"]);
   assert.equal(requests.filter((request) => request.authorization === "Bearer test-key").length, 2);
   assert.ok(requests.some((request) => request.apiKey === "test-key" && request.anthropicVersion === "2023-06-01"));
   assert.ok(requests.some((request) => request.url === "/v1beta/models?pageSize=1000" && request.googleKey === "test-key"));
+  assert.ok(requests.some((request) => request.url === "/v1/models" && request.customKey === "test-key"));
 });
 
 test("saves setup without putting the API key in router config", async () => {
@@ -159,4 +168,34 @@ test("validates setup URL and endpoint ID", async () => {
     }),
     /端点 ID/,
   );
+});
+
+test("saves custom endpoint authentication metadata without saving its key", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-media-router-custom-setup-"));
+  const agentDir = join(root, "agent");
+  const targetPath = join(agentDir, "media-router.json");
+  await mkdir(agentDir, { recursive: true });
+
+  await saveSetup({
+    targetPath,
+    agentDir,
+    baseRoutes: { image: [], audio: [], video: [], pdf: [] },
+    endpointId: "custom",
+    protocol: "custom-openai-chat",
+    baseUrl: "https://example.test/v1",
+    model: "media-model",
+    modalities: ["image", "audio", "video"],
+    apiKey: "custom-secret",
+    apiKeyHeader: "api-key",
+    apiKeyPrefix: "",
+  });
+
+  const text = await readFile(targetPath, "utf8");
+  const config = JSON.parse(text) as {
+    endpoints: { custom: { protocol: string; apiKeyHeader: string; apiKeyPrefix: string } };
+  };
+  assert.equal(text.includes("custom-secret"), false);
+  assert.equal(config.endpoints.custom.protocol, "custom-openai-chat");
+  assert.equal(config.endpoints.custom.apiKeyHeader, "api-key");
+  assert.equal(config.endpoints.custom.apiKeyPrefix, "");
 });

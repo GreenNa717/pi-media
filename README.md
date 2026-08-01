@@ -18,6 +18,7 @@ Pi Media Router 是一个独立的 [Pi](https://github.com/earendil-works/pi) Pa
 - 支持图片、音频、视频和 PDF，并校验文件后缀与实际 MIME。
 - 根据最近会话和用户问题生成媒体分析任务。
 - 支持多端点路由、并发处理、失败重试和顺序回退。
+- 支持自定义 OpenAI Chat 兼容端点、Key 请求头和手动模型 ID。
 - 实时显示多模态模型输出，完成后保留带端点和模型名称的独立报告卡片。
 - 向主模型提供 `media_query` 工具，可在后续回合重新检查原媒体。
 - 当前模型支持图片时直接传递图片；文本模型使用多模态端点生成的报告。
@@ -41,7 +42,7 @@ pi install git:github.com/GreenNa717/pi-media
 /media setup
 ```
 
-向导会要求选择协议、API URL、API Key、模型和媒体类型。配置完成后检查路由：
+向导会要求选择端点类型、API Base URL、API Key、模型和媒体类型。配置完成后检查路由：
 
 ```text
 /media doctor
@@ -101,10 +102,28 @@ D:\media\clip.mp4 提取关键时间点
 | OpenAI Responses | 图片、PDF |
 | Anthropic Messages | 图片、PDF |
 | Gemini GenerateContent / Interactions | 图片、音频、视频、PDF |
+| 自定义 OpenAI Chat 兼容端点 | 图片、音频、视频 |
 
-扩展只发送协议定义的内容块，不猜测 `video_url` 等非标准兼容格式。
+内置协议只发送官方定义的内容块。自定义端点由用户主动启用，使用下文列出的 Data URL 内容块。
 
 分析请求默认使用流式接口。端点返回普通 JSON 时仍可解析；端点在产生增量前明确拒绝流式请求时，扩展会回退一次非流式请求。流式传输中途失败时，未完成内容会被丢弃，并按路由尝试下一个端点。Gemini 自定义流式路径可通过端点的 `streamPath` 设置。
+
+### 自定义端点
+
+在 `/media setup` 中选择“自定义端点（OpenAI Chat 兼容，图片、音频、视频）”，然后输入 Base URL、Key 请求头和模型。向导会请求 `GET /v1/models` 获取模型；接口不提供模型列表时，可以手动输入模型 ID。
+
+自定义端点需要兼容以下接口：
+
+- 分析请求：`POST /v1/chat/completions`。
+- 流式响应：OpenAI Chat SSE `choices[0].delta.content`。
+- 普通响应：OpenAI Chat `choices[0].message.content`。
+- 图片：`image_url` Data URL。
+- 音频：`input_audio.data` Data URL。
+- 视频：`video_url.url` Data URL。
+
+MiMo 可使用 API URL `https://api.xiaomimimo.com/v1`、模型 `mimo-v2.5` 和图片、音频、视频路由。接口格式以 [MiMo 多模态文档](https://mimo.mi.com/docs/zh-CN/usage-guide/multimodal-understanding/image-understanding) 为准。
+
+自定义 OpenAI Chat 端点不处理 PDF。PDF 可配置 OpenAI Responses、Anthropic Messages 或 Gemini 路由。
 
 ## 媒体生命周期
 

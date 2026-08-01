@@ -1,7 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { anthropicHeaders, defaultApiPath, geminiHeaders, openAIHeaders, PROTOCOL_KINDS, requestSecrets } from "./adapters/common.ts";
+import {
+  anthropicHeaders,
+  customOpenAIHeaders,
+  defaultApiPath,
+  geminiHeaders,
+  openAIHeaders,
+  PROTOCOL_KINDS,
+  requestSecrets,
+} from "./adapters/common.ts";
 import { replaceStoredApiKey, type CredentialStoreOptions } from "./credentials.ts";
 import { joinEndpointUrl, requestJson } from "./http.ts";
 import type {
@@ -23,6 +31,8 @@ export interface DiscoveredModel {
 
 export interface DiscoverModelsOptions {
   apiKey?: string;
+  apiKeyHeader?: string;
+  apiKeyPrefix?: string;
   headers?: Record<string, string>;
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -37,6 +47,8 @@ export interface SaveSetupInput extends CredentialStoreOptions {
   model: string;
   modalities: MediaKind[];
   apiKey?: string;
+  apiKeyHeader?: string;
+  apiKeyPrefix?: string;
 }
 
 export class SetupError extends Error {
@@ -46,9 +58,10 @@ export class SetupError extends Error {
   }
 }
 
-export function defaultBaseUrl(protocol: AdapterProtocol): string {
+export function defaultBaseUrl(protocol: AdapterProtocol): string | undefined {
   if (protocol === "gemini") return "https://generativelanguage.googleapis.com/v1beta";
   if (protocol === "anthropic-messages") return "https://api.anthropic.com/v1";
+  if (protocol === "custom-openai-chat") return undefined;
   return "https://api.openai.com/v1";
 }
 
@@ -73,6 +86,8 @@ function setupEndpoint(protocol: AdapterProtocol, baseUrl: string, options: Disc
   const config: EndpointConfig = {
     protocol,
     baseUrl,
+    ...(options.apiKeyHeader ? { apiKeyHeader: options.apiKeyHeader } : {}),
+    ...(options.apiKeyPrefix !== undefined ? { apiKeyPrefix: options.apiKeyPrefix } : {}),
     model: "model-discovery",
     modalities: protocolModalities(protocol),
     auth: { type: "none" },
@@ -104,6 +119,7 @@ function modelListUrl(endpoint: ResolvedEndpoint, query: Record<string, string> 
 function discoveryHeaders(endpoint: ResolvedEndpoint): Record<string, string> {
   if (endpoint.config.protocol === "anthropic-messages") return anthropicHeaders(endpoint);
   if (endpoint.config.protocol === "gemini") return geminiHeaders(endpoint);
+  if (endpoint.config.protocol === "custom-openai-chat") return customOpenAIHeaders(endpoint);
   return openAIHeaders(endpoint);
 }
 
@@ -247,6 +263,12 @@ export async function saveSetup(input: SaveSetupInput): Promise<{ credentialId?:
   }
   if (!input.model.trim()) throw new SetupError("模型 ID 不能为空");
   if (input.apiKey !== undefined && !input.apiKey) throw new SetupError("API Key 不能为空");
+  if (input.apiKeyHeader !== undefined && !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(input.apiKeyHeader)) {
+    throw new SetupError("API Key 请求头名称无效");
+  }
+  if (input.apiKeyPrefix !== undefined && /[\u0000-\u001f\u007f]/.test(input.apiKeyPrefix)) {
+    throw new SetupError("API Key 前缀不能包含控制字符");
+  }
   const supported = new Set(protocolModalities(input.protocol));
   if (input.modalities.length === 0 || input.modalities.some((kind) => !supported.has(kind))) {
     throw new SetupError("媒体类型与所选协议不匹配");
@@ -264,6 +286,8 @@ export async function saveSetup(input: SaveSetupInput): Promise<{ credentialId?:
     model: input.model.trim(),
     modalities: [...input.modalities],
     auth,
+    ...(input.apiKeyHeader ? { apiKeyHeader: input.apiKeyHeader } : {}),
+    ...(input.apiKeyPrefix !== undefined ? { apiKeyPrefix: input.apiKeyPrefix } : {}),
     ...(input.protocol === "gemini" ? { geminiVariant: "generate-content" } : {}),
   };
 

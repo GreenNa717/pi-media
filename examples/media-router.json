@@ -29,12 +29,21 @@
       "modalities": ["image", "audio", "video", "pdf"],
       "auth": { "type": "env", "name": "GEMINI_API_KEY" },
       "geminiVariant": "generate-content"
+    },
+    "custom-media": {
+      "protocol": "custom-openai-chat",
+      "baseUrl": "https://api.example.com/v1",
+      "model": "YOUR_CUSTOM_MEDIA_MODEL",
+      "modalities": ["image", "audio", "video"],
+      "auth": { "type": "env", "name": "CUSTOM_MEDIA_API_KEY" },
+      "apiKeyHeader": "authorization",
+      "apiKeyPrefix": "Bearer "
     }
   },
   "routes": {
-    "image": ["openai-vision", "openai-files", "anthropic-vision", "gemini-media"],
-    "audio": ["gemini-media"],
-    "video": ["gemini-media"],
+    "image": ["custom-media", "openai-vision", "openai-files", "anthropic-vision", "gemini-media"],
+    "audio": ["custom-media", "gemini-media"],
+    "video": ["custom-media", "gemini-media"],
     "pdf": ["openai-files", "anthropic-vision", "gemini-media"]
   }
 }
