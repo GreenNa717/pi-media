@@ -21,7 +21,13 @@ export interface FetchOptions {
   secrets?: readonly string[];
 }
 
-function redact(text: string, secrets: readonly string[]): string {
+export interface ServerSentEvent {
+  event?: string;
+  data: string;
+  id?: string;
+}
+
+export function redactSecrets(text: string, secrets: readonly string[]): string {
   let result = text;
   for (const secret of secrets) {
     if (secret) result = result.replaceAll(secret, "[REDACTED]");
@@ -60,7 +66,7 @@ export async function fetchWithRetry(
       });
       if (response.ok) return response;
 
-      const body = redact(truncate(await response.text(), 2_000), options.secrets ?? []);
+      const body = redactSecrets(truncate(await response.text(), 2_000), options.secrets ?? []);
       const retryable = isRetryableStatus(response.status);
       lastError = new HttpError(`HTTP ${response.status} from ${new URL(url).host}: ${body || response.statusText}`, {
         status: response.status,
@@ -77,7 +83,7 @@ export async function fetchWithRetry(
     await sleep(retryDelay(response, attempt), options.signal);
   }
 
-  const message = redact(lastError?.message ?? `Request failed: ${url}`, options.secrets ?? []);
+  const message = redactSecrets(lastError?.message ?? `Request failed: ${url}`, options.secrets ?? []);
   if (lastError instanceof HttpError) {
     throw new HttpError(message, { ...(lastError.status ? { status: lastError.status } : {}), retryable: lastError.retryable });
   }
@@ -97,6 +103,89 @@ export async function requestJson(
     return JSON.parse(text);
   } catch {
     throw new HttpError(`Invalid JSON response from ${new URL(url).host}: ${truncate(text, 1_000)}`);
+  }
+}
+
+export async function consumeSse(
+  response: Response,
+  onEvent: (event: ServerSentEvent) => void | Promise<void>,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!response.body) throw new HttpError("Streaming response has no body");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let eventName: string | undefined;
+  let eventId: string | undefined;
+  let dataLines: string[] = [];
+
+  const dispatch = async (): Promise<void> => {
+    if (dataLines.length === 0) {
+      eventName = undefined;
+      eventId = undefined;
+      return;
+    }
+    await onEvent({
+      ...(eventName ? { event: eventName } : {}),
+      data: dataLines.join("\n"),
+      ...(eventId ? { id: eventId } : {}),
+    });
+    eventName = undefined;
+    eventId = undefined;
+    dataLines = [];
+  };
+
+  const processLine = async (line: string): Promise<void> => {
+    if (line === "") return dispatch();
+    if (line.startsWith(":")) return;
+    const separator = line.indexOf(":");
+    const field = separator < 0 ? line : line.slice(0, separator);
+    let value = separator < 0 ? "" : line.slice(separator + 1);
+    if (value.startsWith(" ")) value = value.slice(1);
+    if (field === "event") eventName = value;
+    else if (field === "data") dataLines.push(value);
+    else if (field === "id" && !value.includes("\0")) eventId = value;
+  };
+
+  const drain = async (atEnd: boolean): Promise<void> => {
+    while (buffer.length > 0) {
+      const lf = buffer.indexOf("\n");
+      const cr = buffer.indexOf("\r");
+      let index = -1;
+      if (lf >= 0 && cr >= 0) index = Math.min(lf, cr);
+      else index = Math.max(lf, cr);
+      if (index < 0) {
+        if (atEnd) {
+          const finalLine = buffer;
+          buffer = "";
+          await processLine(finalLine);
+        }
+        return;
+      }
+      if (!atEnd && buffer[index] === "\r" && index === buffer.length - 1) return;
+      const line = buffer.slice(0, index);
+      const length = buffer[index] === "\r" && buffer[index + 1] === "\n" ? 2 : 1;
+      buffer = buffer.slice(index + length);
+      await processLine(line);
+    }
+  };
+
+  try {
+    while (true) {
+      if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Media request was cancelled");
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      await drain(false);
+    }
+    buffer += decoder.decode();
+    await drain(true);
+    await dispatch();
+  } catch (error) {
+    await reader.cancel(error).catch(() => undefined);
+    throw error;
+  } finally {
+    reader.releaseLock();
   }
 }
 

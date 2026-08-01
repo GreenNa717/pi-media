@@ -3,11 +3,13 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { endpointHost, resolveEndpoint } from "./auth.ts";
 import { assetToImageContent, parseMediaInput } from "./media.ts";
 import { createAnalysisPlan } from "./planner.ts";
+import type { MediaSessionRegistry } from "./registry.ts";
 import { candidateEndpointIds, routeMedia } from "./router.ts";
 import { ensureUploadConsent } from "./trust.ts";
 import type {
   DetailLevel,
   MediaAsset,
+  MediaProgressListener,
   MediaReport,
   RouterConfig,
 } from "./types.ts";
@@ -18,6 +20,9 @@ export interface PipelineOptions {
   strictMissing?: boolean;
   detail?: DetailLevel;
   endpointOverride?: string;
+  registry?: MediaSessionRegistry;
+  onProgress?: MediaProgressListener;
+  signal?: AbortSignal;
 }
 
 export interface PipelineResult {
@@ -86,6 +91,46 @@ ${reportBlocks}
 </media_analysis>`;
 }
 
+export function formatMediaReferencePrompt(originalRequest: string, assets: readonly MediaAsset[]): string {
+  const request = originalRequest.trim() || "Describe the supplied media and extract the important information.";
+  const references = assets.map((asset) => `[Media: ${asset.id} | ${asset.name} | ${asset.kind}]`).join("\n");
+  return `${request}\n\n${references}`;
+}
+
+export async function analyzeMediaAssets(
+  ctx: ExtensionContext,
+  assets: readonly MediaAsset[],
+  question: string,
+  config: RouterConfig,
+  options: Pick<PipelineOptions, "detail" | "endpointOverride" | "onProgress" | "signal"> = {},
+): Promise<MediaReport[]> {
+  const candidates = candidateEndpointIds(assets, config, options.endpointOverride);
+  if (candidates.length === 0) {
+    throw new Error(`No endpoint route is configured for ${[...new Set(assets.map((asset) => asset.kind))].join(", ")}`);
+  }
+
+  ctx.ui.setStatus("media-router", "Checking media upload permission...");
+  const hosts = await candidateHosts(ctx, assets, config, options.endpointOverride);
+  if (hosts.length > 0) await ensureUploadConsent(ctx, assets, hosts, config.privacy);
+
+  ctx.ui.setStatus("media-router", "Planning media analysis...");
+  const signal = options.signal ?? ctx.signal;
+  const plan = await createAnalysisPlan(ctx, question, assets, config.planner, options.detail, signal);
+
+  ctx.ui.setStatus("media-router", "Analyzing media...");
+  return routeMedia(
+    {
+      assets: [...assets],
+      plan,
+      config,
+      ...(options.endpointOverride ? { endpointOverride: options.endpointOverride } : {}),
+      ...(signal ? { signal } : {}),
+      ...(options.onProgress ? { onProgress: options.onProgress } : {}),
+    },
+    ctx.modelRegistry,
+  );
+}
+
 export async function processMedia(
   ctx: ExtensionContext,
   text: string,
@@ -104,7 +149,7 @@ export async function processMedia(
     ? []
     : parsed.assets.filter((asset) => asset.kind === "image" && imageCapable);
   const bypassIds = new Set(bypassedAssets.map((asset) => asset.id));
-  const routedAssets = parsed.assets.filter((asset) => !bypassIds.has(asset.id));
+  let routedAssets = parsed.assets.filter((asset) => !bypassIds.has(asset.id));
   const bypassImages = await Promise.all(bypassedAssets.map(assetToImageContent));
 
   if (routedAssets.length === 0) {
@@ -117,39 +162,24 @@ export async function processMedia(
     };
   }
 
-  const candidates = candidateEndpointIds(routedAssets, config, options.endpointOverride);
-  if (candidates.length === 0) {
-    throw new Error(`No endpoint route is configured for ${[...new Set(routedAssets.map((asset) => asset.kind))].join(", ")}`);
+  let registeredIds: string[] = [];
+  if (options.registry) {
+    routedAssets = await options.registry.register(routedAssets);
+    registeredIds = routedAssets.map((asset) => asset.id);
   }
 
-  ctx.ui.setStatus("media-router", "Checking media upload permission...");
-  const hosts = await candidateHosts(ctx, routedAssets, config, options.endpointOverride);
-  if (hosts.length > 0) await ensureUploadConsent(ctx, routedAssets, hosts, config.privacy);
-
-  ctx.ui.setStatus("media-router", "Planning media analysis...");
-  const plan = await createAnalysisPlan(
-    ctx,
-    parsed.cleanedText,
-    routedAssets,
-    config.planner,
-    options.detail,
-    ctx.signal,
-  );
-
-  ctx.ui.setStatus("media-router", "Analyzing media...");
-  const reports = await routeMedia(
-    {
-      assets: routedAssets,
-      plan,
-      config,
-      ...(options.endpointOverride ? { endpointOverride: options.endpointOverride } : {}),
-      ...(ctx.signal ? { signal: ctx.signal } : {}),
-    },
-    ctx.modelRegistry,
-  );
+  let reports: MediaReport[];
+  try {
+    reports = await analyzeMediaAssets(ctx, routedAssets, parsed.cleanedText, config, options);
+  } catch (error) {
+    options.registry?.remove(registeredIds);
+    throw error;
+  }
 
   return {
-    text: formatInjectedPrompt(parsed.cleanedText, routedAssets, reports),
+    text: options.registry
+      ? formatMediaReferencePrompt(parsed.cleanedText, routedAssets)
+      : formatInjectedPrompt(parsed.cleanedText, routedAssets, reports),
     images: bypassImages,
     reports,
     routedAssets,

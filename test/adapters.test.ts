@@ -62,6 +62,12 @@ function json(response: ServerResponse, value: unknown, status = 200): void {
   response.end(JSON.stringify(value));
 }
 
+function sse(response: ServerResponse, chunks: readonly string[]): void {
+  response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
+  for (const chunk of chunks) response.write(chunk);
+  response.end();
+}
+
 function endpoint(base: string, protocol: AdapterProtocol, modalities: EndpointConfig["modalities"]): ResolvedEndpoint {
   const version = protocol === "gemini" ? "v1beta" : "v1";
   return {
@@ -203,4 +209,127 @@ test("Gemini uploads, polls, analyzes, and deletes a large file", async (context
     "POST /v1beta/models/gemini-test:generateContent",
     "DELETE /v1beta/files/media123",
   ]);
+});
+
+test("streams deltas from every supported protocol variant", async (context) => {
+  const bodies = new Map<string, unknown>();
+  const server = createServer(async (request, response) => {
+    const path = request.url ?? "";
+    bodies.set(path, await requestBody(request));
+    if (path === "/v1/chat/completions") {
+      return sse(response, [
+        'data: {"choices":[{"delta":{"content":"chat "}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"stream"}}]}\n\n',
+        "data: [DONE]\n\n",
+      ]);
+    }
+    if (path === "/v1/responses") {
+      return sse(response, [
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"responses "}\n\n',
+        'data: {"type":"response.output_text.delta","delta":"stream"}\n\n',
+        "data: [DONE]\n\n",
+      ]);
+    }
+    if (path === "/v1/messages") {
+      return sse(response, [
+        'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"anthropic "}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"stream"}}\n\n',
+      ]);
+    }
+    if (path === "/v1beta/models/gemini-test:streamGenerateContent?alt=sse") {
+      return sse(response, [
+        'data: {"candidates":[{"content":{"parts":[{"text":"gemini "}]}}]}\n\n',
+        'data: {"candidates":[{"content":{"parts":[{"text":"stream"}]}}]}\n\n',
+      ]);
+    }
+    if (path === "/v1beta/interactions") {
+      return sse(response, [
+        'event: step.delta\ndata: {"type":"step.delta","delta":{"type":"text","text":"interaction "}}\n\n',
+        'event: step.delta\ndata: {"type":"step.delta","delta":{"type":"text","text":"stream"}}\n\n',
+      ]);
+    }
+    return json(response, { error: "not found" }, 404);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  context.after(() => server.close());
+  const address = server.address() as AddressInfo;
+  const base = `http://127.0.0.1:${address.port}`;
+  const deltas: string[] = [];
+  const onProgress = (event: { phase: string; delta?: string }) => {
+    if (event.phase === "delta" && event.delta) deltas.push(event.delta);
+  };
+
+  const chat = await openAIChatAdapter.analyze({ endpoint: endpoint(base, "openai-chat", ["image"]), assets: [IMAGE], plan: PLAN, onProgress });
+  const responses = await openAIResponsesAdapter.analyze({ endpoint: endpoint(base, "openai-responses", ["image"]), assets: [IMAGE], plan: PLAN, onProgress });
+  const anthropic = await anthropicMessagesAdapter.analyze({ endpoint: endpoint(base, "anthropic-messages", ["image"]), assets: [IMAGE], plan: PLAN, onProgress });
+  const geminiEndpoint = endpoint(base, "gemini", ["image"]);
+  const gemini = await geminiAdapter.analyze({ endpoint: geminiEndpoint, assets: [IMAGE], plan: PLAN, onProgress });
+  const interactionEndpoint = endpoint(base, "gemini", ["image"]);
+  interactionEndpoint.config.geminiVariant = "interactions";
+  const interaction = await geminiAdapter.analyze({ endpoint: interactionEndpoint, assets: [IMAGE], plan: PLAN, onProgress });
+
+  assert.equal(chat.text, "chat stream");
+  assert.equal(responses.text, "responses stream");
+  assert.equal(anthropic.text, "anthropic stream");
+  assert.equal(gemini.text, "gemini stream");
+  assert.equal(interaction.text, "interaction stream");
+  assert.ok(deltas.length >= 10);
+  assert.equal((bodies.get("/v1/chat/completions") as { stream: boolean }).stream, true);
+  assert.equal((bodies.get("/v1/responses") as { stream: boolean }).stream, true);
+  assert.equal((bodies.get("/v1/messages") as { stream: boolean }).stream, true);
+  assert.equal((bodies.get("/v1beta/interactions") as { stream: boolean }).stream, true);
+});
+
+test("falls back to JSON only when streaming is rejected before a delta", async (context) => {
+  const calls: string[] = [];
+  const server = createServer(async (request, response) => {
+    const path = request.url ?? "";
+    calls.push(path);
+    await requestBody(request);
+    if (path === "/stream") return json(response, { error: "stream unsupported" }, 404);
+    if (path === "/v1/responses") {
+      return json(response, { output: [{ content: [{ type: "output_text", text: "JSON fallback" }] }] });
+    }
+    return json(response, { error: "not found" }, 404);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  context.after(() => server.close());
+  const address = server.address() as AddressInfo;
+  const resolved = endpoint(`http://127.0.0.1:${address.port}`, "openai-responses", ["image"]);
+  resolved.config.streamPath = "/stream";
+  const deltas: string[] = [];
+  const report = await openAIResponsesAdapter.analyze({
+    endpoint: resolved,
+    assets: [IMAGE],
+    plan: PLAN,
+    onProgress: (event) => { if (event.delta) deltas.push(event.delta); },
+  });
+  assert.equal(report.text, "JSON fallback");
+  assert.deepEqual(calls, ["/stream", "/v1/responses"]);
+  assert.deepEqual(deltas, ["JSON fallback"]);
+});
+
+test("redacts secrets from a stream error after partial output", async (context) => {
+  const secret = "do-not-leak-this-key";
+  const server = createServer(async (request, response) => {
+    await requestBody(request);
+    sse(response, [
+      'data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+      `event: error\ndata: ${JSON.stringify({ message: `provider echoed ${secret}` })}\n\n`,
+    ]);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  context.after(() => server.close());
+  const address = server.address() as AddressInfo;
+  const resolved = endpoint(`http://127.0.0.1:${address.port}`, "openai-responses", ["image"]);
+  resolved.apiKey = secret;
+  await assert.rejects(
+    openAIResponsesAdapter.analyze({ endpoint: resolved, assets: [IMAGE], plan: PLAN, onProgress() {} }),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.ok(message.includes("[REDACTED]"));
+      assert.ok(!message.includes(secret));
+      return true;
+    },
+  );
 });

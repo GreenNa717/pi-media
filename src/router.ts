@@ -96,14 +96,42 @@ export async function routeMedia(
 
       try {
         const endpoint = await resolveEndpoint(endpointId, endpointConfig, modelRegistry);
-        return await adapter.analyze({
+        request.onProgress?.({
+          phase: "start",
+          endpointId,
+          protocol: endpointConfig.protocol,
+          model: endpointConfig.model,
+          assetIds: group.assets.map((asset) => asset.id),
+          assetNames: group.assets.map((asset) => asset.name),
+        });
+        const report = await adapter.analyze({
           endpoint,
           assets: group.assets,
           plan: request.plan,
           ...(request.signal ? { signal: request.signal } : {}),
+          ...(request.onProgress ? { onProgress: request.onProgress } : {}),
         });
+        request.onProgress?.({
+          phase: "complete",
+          endpointId,
+          protocol: endpointConfig.protocol,
+          model: endpointConfig.model,
+          assetIds: group.assets.map((asset) => asset.id),
+          assetNames: group.assets.map((asset) => asset.name),
+          text: report.text,
+        });
+        return report;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        request.onProgress?.({
+          phase: "error",
+          endpointId,
+          protocol: endpointConfig.protocol,
+          model: endpointConfig.model,
+          assetIds: group.assets.map((asset) => asset.id),
+          assetNames: group.assets.map((asset) => asset.name),
+          message: truncate(message, 400),
+        });
         diagnostics.push(`${endpointId}: ${truncate(message, 400)}`);
       }
     }

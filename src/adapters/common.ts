@@ -106,6 +106,19 @@ export function requestSecrets(endpoint: ResolvedEndpoint): string[] {
   return secretValues(endpoint);
 }
 
+export function emitDelta(request: AdapterRequest, delta: string): void {
+  if (!delta) return;
+  request.onProgress?.({
+    phase: "delta",
+    endpointId: request.endpoint.id,
+    protocol: request.endpoint.config.protocol,
+    model: request.endpoint.config.model,
+    assetIds: request.assets.map((asset) => asset.id),
+    assetNames: request.assets.map((asset) => asset.name),
+    delta,
+  });
+}
+
 export async function inlineData(asset: MediaAsset): Promise<string> {
   if (asset.sizeBytes > Number.MAX_SAFE_INTEGER) throw new Error(`${asset.name} is too large to encode inline`);
   return assetBase64(asset);

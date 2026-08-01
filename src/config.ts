@@ -173,11 +173,13 @@ function parseEndpoint(id: string, value: unknown, fallback?: EndpointConfig): E
 
   const baseUrl = optionalString(value, "baseUrl") ?? fallback?.baseUrl;
   const path = optionalString(value, "path") ?? fallback?.path;
+  const streamPath = optionalString(value, "streamPath") ?? fallback?.streamPath;
   const uploadPath = optionalString(value, "uploadPath") ?? fallback?.uploadPath;
   return {
     protocol,
     ...(baseUrl ? { baseUrl } : {}),
     ...(path ? { path } : {}),
+    ...(streamPath ? { streamPath } : {}),
     ...(uploadPath ? { uploadPath } : {}),
     model,
     modalities: modalities as MediaKind[],

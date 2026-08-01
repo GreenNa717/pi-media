@@ -6,6 +6,7 @@ import { isRecord, sleep } from "../utils.ts";
 import {
   assertAssets,
   defaultApiPath,
+  emitDelta,
   geminiHeaders,
   inlineData,
   outputTokenLimit,
@@ -15,6 +16,7 @@ import {
   specialistPrompt,
   textProbePrompt,
 } from "./common.ts";
+import { requestStreamingWithFallback } from "./streaming.ts";
 
 interface UploadedFile {
   name: string;
@@ -215,6 +217,101 @@ async function sendInteractions(
   return parseGeminiText(value);
 }
 
+function appendSseQuery(path: string): string {
+  return `${path}${path.includes("?") ? "&" : "?"}alt=sse`;
+}
+
+function defaultGenerateStreamPath(endpoint: ResolvedEndpoint, model: string): string {
+  if (endpoint.config.streamPath) return endpoint.config.streamPath;
+  if (endpoint.config.path) {
+    const derived = endpoint.config.path.replace(":generateContent", ":streamGenerateContent");
+    return appendSseQuery(derived);
+  }
+  return appendSseQuery(defaultApiPath(endpoint, "v1beta", `models/${encodeURIComponent(model)}:streamGenerateContent`));
+}
+
+function geminiDelta(value: unknown, eventName?: string): string | undefined {
+  if (!isRecord(value)) return undefined;
+  if (eventName === "step.delta" || value.type === "step.delta" || value.event_type === "step.delta") {
+    const delta = value.delta;
+    if (typeof delta === "string") return delta;
+    if (isRecord(delta) && typeof delta.text === "string") return delta.text;
+  }
+  if (isRecord(value.delta) && value.delta.type === "text" && typeof value.delta.text === "string") {
+    return value.delta.text;
+  }
+  if (Array.isArray(value.candidates)) {
+    const text = value.candidates
+      .filter(isRecord)
+      .flatMap((candidate) => isRecord(candidate.content) && Array.isArray(candidate.content.parts) ? candidate.content.parts : [])
+      .filter(isRecord)
+      .map((part) => typeof part.text === "string" ? part.text : "")
+      .join("");
+    if (text) return text;
+  }
+  try {
+    return parseGeminiText(value);
+  } catch {
+    return undefined;
+  }
+}
+
+async function sendGenerateContentStreaming(
+  request: AdapterRequest,
+  prompt: string,
+  parts: unknown[],
+  maxTokens: number,
+): Promise<string> {
+  const endpoint = request.endpoint;
+  const model = endpoint.config.model.replace(/^models\//, "");
+  const body = {
+    contents: [{ role: "user", parts: [{ text: prompt }, ...parts] }],
+    generationConfig: { maxOutputTokens: maxTokens },
+  };
+  return requestStreamingWithFallback({
+    url: joinEndpointUrl(endpoint.baseUrl, defaultGenerateStreamPath(endpoint, model)),
+    init: () => ({ method: "POST", headers: geminiHeaders(endpoint), body: JSON.stringify(body) }),
+    fetchOptions: {
+      timeoutMs: endpoint.config.timeoutMs,
+      retries: 1,
+      ...(request.signal ? { signal: request.signal } : {}),
+      secrets: requestSecrets(endpoint),
+    },
+    parser: { label: "Gemini GenerateContent", parseJson: parseGeminiText, parseEvent: geminiDelta },
+    onDelta: (delta) => emitDelta(request, delta),
+    nonStreaming: () => sendGenerateContent(endpoint, prompt, parts, maxTokens, request.signal),
+  });
+}
+
+async function sendInteractionsStreaming(
+  request: AdapterRequest,
+  prompt: string,
+  input: unknown[],
+  maxTokens: number,
+): Promise<string> {
+  const endpoint = request.endpoint;
+  const path = endpoint.config.streamPath ?? endpoint.config.path ?? defaultApiPath(endpoint, "v1beta", "interactions");
+  const body = {
+    model: endpoint.config.model.replace(/^models\//, ""),
+    input: [{ type: "text", text: prompt }, ...input],
+    generation_config: { max_output_tokens: maxTokens },
+    stream: true,
+  };
+  return requestStreamingWithFallback({
+    url: joinEndpointUrl(endpoint.baseUrl, path),
+    init: () => ({ method: "POST", headers: geminiHeaders(endpoint), body: JSON.stringify(body) }),
+    fetchOptions: {
+      timeoutMs: endpoint.config.timeoutMs,
+      retries: 1,
+      ...(request.signal ? { signal: request.signal } : {}),
+      secrets: requestSecrets(endpoint),
+    },
+    parser: { label: "Gemini Interactions", parseJson: parseGeminiText, parseEvent: geminiDelta },
+    onDelta: (delta) => emitDelta(request, delta),
+    nonStreaming: () => sendInteractions(endpoint, prompt, input, maxTokens, request.signal),
+  });
+}
+
 async function sendTextProbe(endpoint: ResolvedEndpoint, signal?: AbortSignal): Promise<string> {
   if (endpoint.config.geminiVariant === "interactions") {
     return sendInteractions(endpoint, textProbePrompt(), [], 32, signal);
@@ -240,6 +337,15 @@ export const geminiAdapter: ProtocolAdapter = {
           generateParts.push({ inlineData: { mimeType: asset.mimeType, data } });
           interactionInput.push({ type: interactionType(asset), data, mime_type: asset.mimeType });
         } else {
+          request.onProgress?.({
+            phase: "upload",
+            endpointId: request.endpoint.id,
+            protocol: request.endpoint.config.protocol,
+            model: request.endpoint.config.model,
+            assetIds: request.assets.map((item) => item.id),
+            assetNames: request.assets.map((item) => item.name),
+            message: `Uploading ${asset.name}`,
+          });
           const uploaded = await waitUntilActive(
             request.endpoint,
             await uploadAsset(request.endpoint, asset, request.signal),
@@ -258,8 +364,12 @@ export const geminiAdapter: ProtocolAdapter = {
       const maxTokens = outputTokenLimit(request.endpoint, request.plan);
       const text =
         request.endpoint.config.geminiVariant === "interactions"
-          ? await sendInteractions(request.endpoint, prompt, interactionInput, maxTokens, request.signal)
-          : await sendGenerateContent(request.endpoint, prompt, generateParts, maxTokens, request.signal);
+          ? request.onProgress
+            ? await sendInteractionsStreaming(request, prompt, interactionInput, maxTokens)
+            : await sendInteractions(request.endpoint, prompt, interactionInput, maxTokens, request.signal)
+          : request.onProgress
+            ? await sendGenerateContentStreaming(request, prompt, generateParts, maxTokens)
+            : await sendGenerateContent(request.endpoint, prompt, generateParts, maxTokens, request.signal);
       return reportFor(request, text, warnings);
     } finally {
       for (const uploaded of uploadedFiles) {

@@ -29,6 +29,7 @@ export interface EndpointConfig {
   protocol: AdapterProtocol;
   baseUrl?: string;
   path?: string;
+  streamPath?: string;
   uploadPath?: string;
   model: string;
   modalities: MediaKind[];
@@ -92,6 +93,22 @@ export interface MediaReport {
   warnings: string[];
 }
 
+export type MediaProgressPhase = "start" | "upload" | "delta" | "complete" | "error";
+
+export interface MediaProgressEvent {
+  phase: MediaProgressPhase;
+  endpointId: string;
+  protocol: AdapterProtocol;
+  model: string;
+  assetIds: string[];
+  assetNames: string[];
+  delta?: string;
+  text?: string;
+  message?: string;
+}
+
+export type MediaProgressListener = (event: MediaProgressEvent) => void;
+
 export interface ResolvedEndpoint {
   id: string;
   config: EndpointConfig;
@@ -105,6 +122,7 @@ export interface AdapterRequest {
   assets: MediaAsset[];
   plan: AnalysisPlan;
   signal?: AbortSignal;
+  onProgress?: MediaProgressListener;
 }
 
 export interface ProtocolAdapter {
@@ -120,6 +138,7 @@ export interface RouteRequest {
   config: RouterConfig;
   endpointOverride?: string;
   signal?: AbortSignal;
+  onProgress?: MediaProgressListener;
 }
 
 export interface ParsedMediaInput {

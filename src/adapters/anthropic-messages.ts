@@ -4,6 +4,7 @@ import {
   anthropicHeaders,
   assertAssets,
   defaultApiPath,
+  emitDelta,
   inlineData,
   outputTokenLimit,
   parseAnthropicText,
@@ -12,6 +13,8 @@ import {
   specialistPrompt,
   textProbePrompt,
 } from "./common.ts";
+import { requestStreamingWithFallback } from "./streaming.ts";
+import { isRecord } from "../utils.ts";
 
 async function send(endpoint: ResolvedEndpoint, content: unknown[], maxTokens: number, signal?: AbortSignal): Promise<string> {
   const path = endpoint.config.path ?? defaultApiPath(endpoint, "v1", "messages");
@@ -26,6 +29,38 @@ async function send(endpoint: ResolvedEndpoint, content: unknown[], maxTokens: n
     { timeoutMs: endpoint.config.timeoutMs, retries: 1, ...(signal ? { signal } : {}), secrets: requestSecrets(endpoint) },
   );
   return parseAnthropicText(value);
+}
+
+async function sendStreaming(request: AdapterRequest, content: unknown[], maxTokens: number): Promise<string> {
+  const endpoint = request.endpoint;
+  const path = endpoint.config.streamPath ?? endpoint.config.path ?? defaultApiPath(endpoint, "v1", "messages");
+  const body = {
+    model: endpoint.config.model,
+    max_tokens: maxTokens,
+    messages: [{ role: "user", content }],
+    stream: true,
+  };
+  return requestStreamingWithFallback({
+    url: joinEndpointUrl(endpoint.baseUrl, path),
+    init: () => ({ method: "POST", headers: anthropicHeaders(endpoint), body: JSON.stringify(body) }),
+    fetchOptions: {
+      timeoutMs: endpoint.config.timeoutMs,
+      retries: 1,
+      ...(request.signal ? { signal: request.signal } : {}),
+      secrets: requestSecrets(endpoint),
+    },
+    parser: {
+      label: "Anthropic Messages",
+      parseJson: parseAnthropicText,
+      parseEvent(value, eventName) {
+        if (!isRecord(value) || (eventName !== "content_block_delta" && value.type !== "content_block_delta")) return undefined;
+        if (!isRecord(value.delta) || value.delta.type !== "text_delta") return undefined;
+        return typeof value.delta.text === "string" ? value.delta.text : undefined;
+      },
+    },
+    onDelta: (delta) => emitDelta(request, delta),
+    nonStreaming: () => send(endpoint, content, maxTokens, request.signal),
+  });
 }
 
 export const anthropicMessagesAdapter: ProtocolAdapter = {
@@ -45,7 +80,10 @@ export const anthropicMessagesAdapter: ProtocolAdapter = {
         content.push({ type: "document", source: { type: "base64", media_type: "application/pdf", data } });
       }
     }
-    const text = await send(request.endpoint, content, outputTokenLimit(request.endpoint, request.plan), request.signal);
+    const maxTokens = outputTokenLimit(request.endpoint, request.plan);
+    const text = request.onProgress
+      ? await sendStreaming(request, content, maxTokens)
+      : await send(request.endpoint, content, maxTokens, request.signal);
     return reportFor(request, text);
   },
   async probe(endpoint, signal) {

@@ -2,9 +2,17 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { loadRouterConfig } from "./config.ts";
 import { runDoctor } from "./doctor.ts";
 import { processMedia, type PipelineOptions } from "./pipeline.ts";
+import type { MediaSessionRegistry } from "./registry.ts";
 import { runSetupCommand } from "./setup-command.ts";
 import { resetUploadTrust } from "./trust.ts";
-import type { DetailLevel } from "./types.ts";
+import type { DetailLevel, MediaAsset, MediaProgressEvent, MediaReport } from "./types.ts";
+
+export interface MediaCommandRuntime {
+  registry: MediaSessionRegistry;
+  onProgress(event: MediaProgressEvent, ctx: ExtensionCommandContext): void;
+  onReports(assets: readonly MediaAsset[], reports: readonly MediaReport[]): void;
+  clearProgress(ctx: ExtensionCommandContext): void;
+}
 
 interface ParsedMediaCommand {
   input: string;
@@ -50,7 +58,12 @@ function notifyFailure(ctx: ExtensionCommandContext, args: string, error: unknow
   if (ctx.hasUI) ctx.ui.setEditorText(`/media ${args}`);
 }
 
-export async function handleMediaCommand(pi: ExtensionAPI, args: string, ctx: ExtensionCommandContext): Promise<void> {
+export async function handleMediaCommand(
+  pi: ExtensionAPI,
+  args: string,
+  ctx: ExtensionCommandContext,
+  runtime: MediaCommandRuntime,
+): Promise<void> {
   const trimmed = args.trim();
   if (trimmed === "setup") {
     try {
@@ -86,8 +99,13 @@ export async function handleMediaCommand(pi: ExtensionAPI, args: string, ctx: Ex
     const parsed = parseMediaCommand(args);
     if (!ctx.isIdle()) await ctx.waitForIdle();
     const loaded = await loadRouterConfig(ctx.cwd);
-    const result = await processMedia(ctx, parsed.input, undefined, loaded.config, parsed.options);
+    const result = await processMedia(ctx, parsed.input, undefined, loaded.config, {
+      ...parsed.options,
+      registry: runtime.registry,
+      onProgress: (event) => runtime.onProgress(event, ctx),
+    });
     if (!result) throw new Error("No supported media files were found");
+    runtime.onReports(result.routedAssets, result.reports);
     pi.sendUserMessage([
       { type: "text", text: result.text },
       ...result.images,
@@ -96,5 +114,6 @@ export async function handleMediaCommand(pi: ExtensionAPI, args: string, ctx: Ex
     notifyFailure(ctx, args, error);
   } finally {
     ctx.ui.setStatus("media-router", undefined);
+    runtime.clearProgress(ctx);
   }
 }

@@ -45,6 +45,10 @@ interface PathReference {
   explicit: boolean;
 }
 
+export interface InspectedMediaFile extends Omit<MediaAsset, "id" | "index"> {
+  mtimeMs: number;
+}
+
 export class MediaInputError extends Error {
   constructor(message: string) {
     super(message);
@@ -120,7 +124,7 @@ function expandTilde(filePath: string): string {
   return filePath;
 }
 
-async function inspectFile(filePath: string, kind: MediaKind): Promise<Omit<MediaAsset, "id" | "index">> {
+export async function inspectMediaFile(filePath: string, kind: MediaKind): Promise<InspectedMediaFile> {
   let info;
   try {
     info = await stat(filePath);
@@ -149,6 +153,7 @@ async function inspectFile(filePath: string, kind: MediaKind): Promise<Omit<Medi
     name: canonicalPath.split(/[\\/]/).at(-1) ?? canonicalPath,
     mimeType,
     sizeBytes: info.size,
+    mtimeMs: info.mtimeMs,
     source: { type: "file", path: canonicalPath },
   };
 }
@@ -302,11 +307,12 @@ export async function parseMediaInput(
     const expanded = expandTilde(reference.pathText);
     const resolvedPath = isAbsolute(expanded) ? resolve(expanded) : resolve(cwd, expanded);
     try {
-      const inspected = await inspectFile(resolvedPath, kind);
+      const inspected = await inspectMediaFile(resolvedPath, kind);
       const canonicalPath = inspected.source.type === "file" ? inspected.source.path : resolvedPath;
       if (!seenPaths.has(canonicalPath)) {
         const assetIndex = assets.length;
-        assets.push({ ...inspected, id: `media-${assetIndex + 1}`, index: assetIndex });
+        const { mtimeMs: _mtimeMs, ...mediaAsset } = inspected;
+        assets.push({ ...mediaAsset, id: `media-${assetIndex + 1}`, index: assetIndex });
         seenPaths.add(canonicalPath);
       }
       replacements.push({ start: reference.start, end: reference.end, value: "" });
