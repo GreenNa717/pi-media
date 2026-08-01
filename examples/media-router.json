@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "endpoints": {
+    "openai-vision": {
+      "protocol": "openai-chat",
+      "baseUrl": "https://api.openai.com/v1",
+      "model": "YOUR_OPENAI_VISION_MODEL",
+      "modalities": ["image"],
+      "auth": { "type": "env", "name": "OPENAI_API_KEY" }
+    },
+    "openai-files": {
+      "protocol": "openai-responses",
+      "baseUrl": "https://api.openai.com/v1",
+      "model": "YOUR_OPENAI_RESPONSES_MODEL",
+      "modalities": ["image", "pdf"],
+      "auth": { "type": "env", "name": "OPENAI_API_KEY" }
+    },
+    "anthropic-vision": {
+      "protocol": "anthropic-messages",
+      "baseUrl": "https://api.anthropic.com/v1",
+      "model": "YOUR_CLAUDE_MODEL",
+      "modalities": ["image", "pdf"],
+      "auth": { "type": "env", "name": "ANTHROPIC_API_KEY" }
+    },
+    "gemini-media": {
+      "protocol": "gemini",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+      "model": "YOUR_GEMINI_MODEL",
+      "modalities": ["image", "audio", "video", "pdf"],
+      "auth": { "type": "env", "name": "GEMINI_API_KEY" },
+      "geminiVariant": "generate-content"
+    }
+  },
+  "routes": {
+    "image": ["openai-vision", "openai-files", "anthropic-vision", "gemini-media"],
+    "audio": ["gemini-media"],
+    "video": ["gemini-media"],
+    "pdf": ["openai-files", "anthropic-vision", "gemini-media"]
+  }
+}

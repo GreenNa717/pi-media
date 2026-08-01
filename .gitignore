@@ -1,0 +1,9 @@
+node_modules/
+coverage/
+*.tgz
+.DS_Store
+.pi/media-router.json
+.env
+.env.*
+!.env.example
+npm-debug.log*
