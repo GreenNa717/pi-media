@@ -118,4 +118,4 @@ npm run pack:dry
 
 ## 社区支持
 
-(https://linux.do)
+https://linux.do
