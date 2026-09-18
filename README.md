@@ -89,7 +89,7 @@ D:\media\clip.mp4 提取关键时间点
 | `/media doctor` | 检查配置、鉴权和路由 |
 | `/media doctor --probe` | 发送最小文本请求测试端点 |
 | `/media trust reset` | 清除当前项目的上传许可 |
-| `/media @file -- <问题>` | 强制分析指定媒体 |
+| `/media [--endpoint ID] [--detail task|full] @file -- <问题>` | 强制分析指定媒体 |
 
 > [!WARNING]
 > `/media doctor --probe` 会访问已配置的端点，可能产生少量费用。
